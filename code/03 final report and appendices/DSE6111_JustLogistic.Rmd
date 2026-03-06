@@ -1,0 +1,233 @@
+---
+title: "Just lg"
+author: "June Lemieux"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+      latex_engine: xelatex
+---
+
+```{r, Libraries, logical:FALSE}
+# libraries/etc
+library(tidymodels)
+library(ggplot2)
+library(vip)
+options(scipen=4) 
+```
+
+```{r, Setup}
+## Data Processing
+# Initial data import
+customer_data <- read.csv("~/00 Merrimack/DSE6111/Course Project/customer_data_1.csv", header = TRUE)
+
+customer_data$Attrition_Flag <- ifelse(customer_data$Attrition_Flag == "Attrited Customer", 1, 0)
+customer_data$Attrition_Flag <- factor(customer_data$Attrition_Flag)
+
+# check levels
+levels(customer_data$Attrition_Flag)
+
+# set seed
+set.seed(10)
+
+# get rid of ClientNum identifier
+customer_data <- customer_data[ -c(1) ]
+
+# create data split
+data_split <- initial_split(customer_data, strata = "Attrition_Flag", prop = 0.75)
+
+# create training and test sets
+training_set <- training(data_split)
+test_set  <- testing(data_split)
+
+# row count per set
+nrow(training_set)
+nrow(test_set)
+
+# use cv folds and tune
+cv_set <- vfold_cv(training_set, v = 10)
+```
+
+```{r, lgModel}
+
+# create recipe for preprocessing - only numeric var at first
+attrition_recipe_lg <- 
+  recipe(
+    Attrition_Flag ~ Months_on_book + Total_Relationship_Count + 
+      Months_Inactive_12_mon + Contacts_Count_12_mon + Total_Amt_Chng_Q4_Q1 + 
+      Total_Trans_Amt + Total_Trans_Ct + Total_Ct_Chng_Q4_Q1 + 
+      Avg_Utilization_Ratio, 
+    data = training_set,
+  ) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+# model with lg
+lg_spec <- 
+  logistic_reg(penalty = tune(), mixture = 1) %>%
+  set_engine("glmnet") %>%
+  set_mode("classification")
+
+# create workflow
+lg_workflow <- workflow() %>%
+  add_recipe(attrition_recipe_lg) %>%
+  add_model(lg_spec)
+
+# build tuning grid
+lg_tune_grid <- tibble(penalty = 10^seq(-1, 0, length.out = 15))
+
+lg_results <-
+  lg_workflow %>%
+  tune_grid(
+    cv_set,
+    grid = lg_tune_grid,
+    control = control_grid(save_pred = TRUE),
+    metrics = metric_set(roc_auc, accuracy)
+  )
+```
+
+```{r, metrics & preds}
+
+lg_results %>% show_best(metric = "roc_auc")
+
+autoplot(lg_results)
+
+best_auc <- lg_results %>% select_best(metric = "roc_auc")
+best_acc <- lg_results %>% select_best(metric = "accuracy")
+
+
+lg_plot <- 
+  lg_results %>%
+  collect_metrics() %>%
+  ggplot(aes(x = penalty, y = mean)) +
+    geom_point() + 
+    geom_line() +
+    ylab("Area under the ROC curve") +
+    scale_x_log10(labels = scales::label_number()) +
+    ggtitle("Plot of lg_results", subtitle="AUC")
+
+lg_plot
+```
+
+```{r, final}
+
+final_lg_workflow <- finalize_workflow(
+  lg_workflow, 
+  best_auc
+)
+
+last_lg_fit <-
+  final_lg_workflow %>%
+  last_fit(data_split)
+
+lg_metrics <- last_lg_fit %>% collect_metrics()
+```
+
+```{r, feature importance}
+
+# feature importance - 
+last_lg_fit %>%
+  extract_fit_parsnip() %>%
+  vip(num_features = 10)
+```
+
+```{r, compare to null}
+# compare to the null model
+null_classification <- null_model() %>%
+  set_engine("parsnip")%>%
+  set_mode("classification")
+
+null_lg <- workflow() %>%
+  add_recipe(attrition_recipe_lg) %>%
+  add_model(null_classification) %>%
+  fit_resamples(
+    cv_set
+  )
+
+null_metrics <- null_lg %>% collect_metrics()
+```
+
+```{r, ROC Curve}
+################################### plot ROC curve ###################################
+test_results <- 
+  test_set %>%
+  select(Attrition_Flag) %>%
+  bind_cols (
+    last_lg_fit %>% collect_predictions() %>%
+      select(p_1 = .pred_1)
+  )
+
+roc_data <- data.frame(threshold = seq(1, 0, -0.01), fpr = 0, trp = 0)
+for (i in roc_data$threshold) {
+  over_threshold <- test_results[test_results$p_1 >= i, ]
+  
+  fpr <- sum(over_threshold$Attrition_Flag == 0)/sum(test_results$Attrition_Flag==0)
+  roc_data[roc_data$threshold==i, "fpr"] <- fpr
+  
+  tpr <- sum(over_threshold$Attrition_Flag == 1)/sum(test_results$Attrition_Flag==1)
+  roc_data[roc_data$threshold==i, "tpr"] <- tpr  
+}
+
+ggplot() +
+  geom_line(data = roc_data, aes(x = fpr, y = tpr, color = threshold), linewidth = 2) +
+  scale_color_gradientn(colors = rainbow(3)) +
+  geom_abline(intercept = 0, slope = 1, lty = 2) +
+  geom_point(data = roc_data[seq(1, 101, 10), ], aes(x = fpr, y = tpr)) +
+  geom_text(data = roc_data[seq(1, 101, 10), ], 
+            aes(x = fpr, y = tpr, label = threshold, hjust = 1.2, vjust = -0.2)) +
+  ggtitle("ROC Curve", subtitle = "Lasso Logistic")
+
+###################### ROC curve calculation breakdown ###################################
+
+ggplot(data = test_results, aes(x = p_1, y = Attrition_Flag)) +
+  geom_jitter()
+
+threshold <- 0.23
+
+test_results$predictions <- ifelse(test_results$p_1 >= threshold, 1, 0)
+tp <- nrow(test_results[test_results$Attrition_Flag==1 & test_results$predictions==1, ])
+fp <- nrow(test_results[test_results$Attrition_Flag==0 & test_results$predictions==1, ])
+tn <- nrow(test_results[test_results$Attrition_Flag==0 & test_results$predictions==0, ])
+fn <- nrow(test_results[test_results$Attrition_Flag==1 & test_results$predictions==0, ])
+
+test_results$type <- ""
+test_results[test_results$Attrition_Flag==1 & test_results$predictions==1, "type"] <- "tp"
+test_results[test_results$Attrition_Flag==0 & test_results$predictions==1, "type"] <- "fp"
+test_results[test_results$Attrition_Flag==0 & test_results$predictions==0, "type"] <- "tn"
+test_results[test_results$Attrition_Flag==1 & test_results$predictions==0, "type"] <- "fn"
+
+ggplot(data = test_results, aes(x = p_1, y = Attrition_Flag)) +
+  geom_jitter(aes(colour = type)) +
+  geom_vline(xintercept = threshold, linetype = "dashed", color = "blue", linewidth = 1.5) +
+  scale_color_brewer(palette = "RdYlBu") +
+  ggtitle("ROC Curve Calculation Breakdown", subtitle = "Lasso Logistic")
+
+fpr <- fp/(fp + tn)
+tpr <- tp/(tp + fn)
+
+# confusion matrix data
+tn
+fn
+fp
+tp
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```
+

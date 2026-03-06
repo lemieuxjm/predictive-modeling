@@ -1,0 +1,103 @@
+---
+title: "Just lg"
+author: "June Lemieux"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+      latex_engine: xelatex
+---
+
+```{r, Libraries, logical:FALSE}
+# libraries/etc
+library(tidymodels)
+library(ggplot2)
+library(vip)
+options(scipen=4) 
+```
+
+```{r, Setup}
+## Data Processing
+# Initial data import
+customer_data <- read.csv("~/00 Merrimack/DSE6111/Course Project/customer_data_1.csv", header = TRUE)
+
+customer_data$Attrition_Flag <- ifelse(customer_data$Attrition_Flag == "Attrited Customer", 1, 0)
+customer_data$Attrition_Flag <- factor(customer_data$Attrition_Flag)
+
+# check levels
+levels(customer_data$Attrition_Flag)
+
+# set seed
+set.seed(10)
+
+# get rid of ClientNum identifier
+customer_data <- customer_data[ -c(1) ]
+
+# create data split
+data_split <- initial_split(customer_data, strata = "Attrition_Flag", prop = 0.75)
+
+# create training and test sets
+training_set <- training(data_split)
+test_set  <- testing(data_split)
+
+# row count per set
+nrow(training_set)
+nrow(test_set)
+
+# use cv folds and tune
+cv_set <- vfold_cv(training_set, v = 10)
+```
+
+```{r, lgModel}
+
+# create recipe for preprocessing 
+attrition_recipe_lg <- 
+  recipe(
+    Attrition_Flag ~ ., 
+    data = training_set,
+  ) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+```
+
+
+```{r, compare to null}
+# compare to the null model
+null_classification <- null_model() %>%
+  set_engine("parsnip")%>%
+  set_mode("classification")
+
+null_lg <- workflow() %>%
+  add_recipe(attrition_recipe_lg) %>%
+  add_model(null_classification) %>%
+  fit_resamples(
+    cv_set
+  )
+
+null_metrics <- null_lg %>% collect_metrics()
+
+null_lg %>% show_best(metric = "roc_auc")
+null_lg %>% show_best(metric = "accuracy")
+
+null_metrics
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```
+

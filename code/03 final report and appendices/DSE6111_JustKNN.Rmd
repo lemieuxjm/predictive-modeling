@@ -1,0 +1,218 @@
+---
+title: "Just KNN"
+author: "June Lemieux"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+      latex_engine: xelatex
+    
+---
+# libraries/etc
+```{r, Libraries, logical:FALSE}
+library(tidymodels)
+library(ggplot2)
+library(vip)
+library(ROCR)
+options(scipen=4) 
+```
+
+```{r, Setup}
+## Data Processing
+# Initial data import
+customer_data <- read.csv("~/00 Merrimack/DSE6111/Course Project/customer_data_1.csv", header = TRUE)
+
+customer_data$Attrition_Flag <- ifelse(customer_data$Attrition_Flag == "Attrited Customer", 1, 0)
+customer_data$Attrition_Flag <- factor(customer_data$Attrition_Flag)
+
+# check levels
+levels(customer_data$Attrition_Flag)
+
+# set seed
+set.seed(10)
+
+# get rid of ClientNum identifier
+customer_data <- customer_data[ -c(1) ]
+
+# create data split
+data_split <- initial_split(customer_data, strata = "Attrition_Flag", prop = 0.75)
+
+# create training and test sets
+training_set <- training(data_split)
+test_set  <- testing(data_split)
+
+# row count per set
+nrow(training_set)
+nrow(test_set)
+
+# use cv folds and tune
+cv_set <- vfold_cv(training_set, v = 10)
+```
+
+```{r, KNNModel}
+
+# create recipe for preprocessing - only numeric var at first
+attrition_recipe_knn <- 
+  recipe(
+    Attrition_Flag ~ Months_on_book + Total_Relationship_Count + Months_Inactive_12_mon + Contacts_Count_12_mon +
+      Total_Amt_Chng_Q4_Q1 + Total_Trans_Amt + Total_Trans_Ct + Total_Ct_Chng_Q4_Q1 + 
+      Avg_Utilization_Ratio, 
+    data = training_set
+  ) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+# model with KNN
+knn_spec <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")  # need to double check this setting
+
+# create workflow
+knn_workflow <- workflow() %>%
+  add_recipe(attrition_recipe_knn) %>%
+  add_model(knn_spec)
+
+# build tuning grid
+knn_tune_grid <- tibble(neighbors = c(1, 5, 10, 15, 20))
+
+knn_tune <-
+  knn_workflow %>%
+  tune_grid(
+    cv_set,
+    grid = knn_tune_grid,
+    control = control_grid(save_pred = TRUE),
+    metrics = metric_set(roc_auc, accuracy)
+  )
+```
+
+```{r, metrics & preds}
+knn_rs_metrics <- knn_tune %>% collect_metrics()
+knn_rs_predictions <- knn_tune %>% collect_predictions()
+
+knn_rs_metrics
+
+# roc_auc and accuracy
+knn_tune %>% show_best(metric = "roc_auc")
+
+autoplot(knn_tune)
+
+best_auc <- knn_tune %>% select_best(metric = "roc_auc")
+best_acc <- knn_tune %>% select_best(metric = "accuracy")
+best_neighbors <- knn_tune %>% select_best(metric = 'roc_auc')
+
+# plot
+knn_plot <- 
+  knn_tune %>%
+  collect_metrics() %>%
+  ggplot(aes(x = neighbors, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  ylab("Area under the ROC curve") +
+  scale_x_log10(labels = scales::label_number())
+
+knn_plot
+```
+
+```{r, final}
+final_knn_workflow <- finalize_workflow(
+  knn_workflow, 
+  best_neighbors
+)
+
+last_knn_fit <-
+  final_knn_workflow %>%
+  last_fit(data_split)
+
+knn_metrics <- last_knn_fit %>% collect_metrics()
+```
+
+```{r, feature importance}
+# feature importance - not for KNN as is
+# last_knn_fit %>%
+#  extract_fit_parsnip() %>%
+#  vip(num_features = 10)
+
+#If you are set on using KNN though, then the best way to estimate feature importance is by taking the sample to predict on, and computing its distance from each of its nearest neighbors for each feature (call these neighb_dist). Then do the same computations for a few random points (call these rand_dist) instead of the nearest neighbors. Then for each feature, you take the ratio of neighb_dist / rand_dist, and the smaller the ratio, the more important that feature is.#
+```
+
+```{r, compare to null}
+# compare to the null model
+null_classification <- null_model() %>%
+  set_engine("parsnip")%>%
+  set_mode("classification")
+
+null_knn <- workflow() %>%
+  add_recipe(attrition_recipe_knn) %>%
+  add_model(null_classification) %>%
+  fit_resamples(
+    cv_set
+  )
+
+null_metrics <- null_knn %>% collect_metrics()
+```
+
+```{r, ROC curve}
+################################### plot ROC curve ###################################
+test_results <- 
+  test_set %>%
+  select(Attrition_Flag) %>%
+  bind_cols (
+    last_knn_fit %>% collect_predictions() %>%
+      select(p_1 = .pred_1)
+  )
+
+roc_data <- data.frame(threshold = seq(1, 0, -0.01), fpr = 0, trp = 0)
+for (i in roc_data$threshold) {
+  over_threshold <- test_results[test_results$p_1 >= i, ]
+  
+  fpr <- sum(over_threshold$Attrition_Flag == 0)/sum(test_results$Attrition_Flag==0)
+  roc_data[roc_data$threshold==i, "fpr"] <- fpr
+  
+  tpr <- sum(over_threshold$Attrition_Flag == 1)/sum(test_results$Attrition_Flag==1)
+  roc_data[roc_data$threshold==i, "tpr"] <- tpr  
+}
+
+ggplot() +
+  geom_line(data = roc_data, aes(x = fpr, y = tpr, color = threshold), linewidth = 2) +
+  scale_color_gradientn(colors = rainbow(3)) +
+  geom_abline(intercept = 0, slope = 1, lty = 2) +
+  geom_point(data = roc_data[seq(1, 101, 10), ], aes(x = fpr, y = tpr)) +
+  geom_text(data = roc_data[seq(1, 101, 10), ], 
+            aes(x = fpr, y = tpr, label = threshold, hjust = 1.2, vjust = -0.2)) +
+  ggtitle("ROC Curve", subtitle = "kNN")
+
+###################### ROC curve calculation breakdown ###################################
+
+ggplot(data = test_results, aes(x = p_1, y = Attrition_Flag)) +
+  geom_jitter()
+
+threshold <- 0.45
+
+test_results$predictions <- ifelse(test_results$p_1 >= threshold, 1, 0)
+tp <- nrow(test_results[test_results$Attrition_Flag==1 & test_results$predictions==1, ])
+fp <- nrow(test_results[test_results$Attrition_Flag==0 & test_results$predictions==1, ])
+tn <- nrow(test_results[test_results$Attrition_Flag==0 & test_results$predictions==0, ])
+fn <- nrow(test_results[test_results$Attrition_Flag==1 & test_results$predictions==0, ])
+
+test_results$type <- ""
+test_results[test_results$Attrition_Flag==1 & test_results$predictions==1, "type"] <- "tp"
+test_results[test_results$Attrition_Flag==0 & test_results$predictions==1, "type"] <- "fp"
+test_results[test_results$Attrition_Flag==0 & test_results$predictions==0, "type"] <- "tn"
+test_results[test_results$Attrition_Flag==1 & test_results$predictions==0, "type"] <- "fn"
+
+ggplot(data = test_results, aes(x = p_1, y = Attrition_Flag)) +
+  geom_jitter(aes(colour = type)) +
+  geom_vline(xintercept = threshold, linetype = "dashed", color = "blue", linewidth = 1.5) +
+  scale_color_brewer(palette = "RdYlBu") +
+  ggtitle("ROC Curve Calculation Breakdown", subtitle = "kNN")
+
+fpr <- fp/(fp + tn)
+tpr <- tp/(tp + fn)
+
+# confusion matrix data
+tn
+fn
+fp
+tp
+```
+

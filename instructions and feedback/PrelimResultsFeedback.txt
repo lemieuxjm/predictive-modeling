@@ -1,0 +1,19 @@
+Prelim Feedback
+Dec 5, 2024 at 9:30pm
+
+Excellent work on the Preliminary Results, June! Since almost all of the requirements for this assignment have been satisfied, the most important requirements to focus on for the Final Report are:
+
+-Define the null model and compare all models to it.
+
+-Evaluate and compare all required models using accuracy, ROC curves, and AUC, to select the best model.
+
+-Discuss the findings from the above analyses, as well as how the model will be used in practice.
+
+-Discuss future research/steps forward. The steps forward can include data that may be worthwhile including in future analyses.
+
+Please feel free to send your code so I can provide more detailed feedback regarding plotting the ROC curve and let me know if you have any questions!
+
+Best,
+Peter
+
+- Peter Salemi

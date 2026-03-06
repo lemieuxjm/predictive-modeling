@@ -1,0 +1,190 @@
+---
+title: "Preliminary Results v2"
+author: "June Lemieux"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+      latex_engine: xelatex
+    
+---
+# libraries/etc
+```{r, Libraries, logical:FALSE}
+library(tidymodels)
+library(ggplot2)
+options(scipen=4) 
+```
+
+```{r, Setup}
+# Initial data import
+customer_data <- read.csv("~/00 Merrimack/DSE6111/Course Project/customer_data_1.csv", header = TRUE)
+
+customer_data$Attrition_Flag <- ifelse(customer_data$Attrition_Flag == "Attrited Customer", 1, 0)
+customer_data$Attrition_Flag <- factor(customer_data$Attrition_Flag)
+
+# check levels
+levels(customer_data$Attrition_Flag)
+
+# set seed
+set.seed(10)
+
+# get rid of ClientNum identifier
+customer_data <- customer_data[ -c(1) ]
+
+# create data split
+data_split <- initial_split(customer_data, strata = "Attrition_Flag", prop = 0.75)
+
+# create training and test sets
+training_set <- training(data_split)
+test_set  <- testing(data_split)
+
+# row count per set
+nrow(training_set)
+nrow(test_set)
+```
+
+```{r, LogisticModel}
+# create recipe - only numeric var at first
+attrition_recipe_log <- 
+  recipe(
+    Attrition_Flag ~ Months_on_book + Total_Relationship_Count + Months_Inactive_12_mon + Contacts_Count_12_mon +
+      Total_Amt_Chng_Q4_Q1 + Total_Trans_Amt + Total_Trans_Ct + Total_Ct_Chng_Q4_Q1 + 
+      Avg_Utilization_Ratio, 
+    data = training_set
+  ) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors()) %>%
+  prep(training = training_set)
+
+# train logistic model
+logreg_fit_a <- 
+  logistic_reg() %>%
+  set_engine("glm") %>%
+  fit(Attrition_Flag ~ ., data = bake(attrition_recipe_log, new_data = training_set))
+logreg_fit_a
+
+# bake model with test set
+test_baked_log <- bake(attrition_recipe_log, new_data = test_set, all_predictors())
+
+# model with test set
+test_results_log <- 
+  test_set %>%
+  select(Attrition_Flag) %>%
+  bind_cols(
+    predict(logreg_fit_a, new_data = test_baked_log, type = "prob") %>%
+    select(logreg_pred = .pred_1)
+  )
+
+glm.probs[1:10]
+head(test_results_log)
+contrasts(test_results_log$Attrition_Flag)
+pred_result <- rep("Not At Risk", 2532)
+pred_result[test_results_log$logreg_pred > .50] = "At Risk"
+table(pred_result, test_results_log$Attrition_Flag)
+# correct 
+             
+#pred_result      0    1
+#  At Risk       76  211
+#  Not At Risk 2049  196
+
+################################### plot ROC curve ###################################
+
+roc_data_log <- data.frame(threshold=seq(1,0,-0.01), fpr=0, tpr=0)
+for (i in roc_data_log$threshold) {
+  
+  over_threshold <- test_results_log[test_results_log$logreg_pred >= i, ]
+
+  fpr <- sum(over_threshold$Attrition_Flag==0)/sum(test_results_log$Attrition_Flag==0)
+  roc_data_log[roc_data_log$threshold==i, "fpr"] <- fpr
+  
+  tpr <- sum(over_threshold$Attrition_Flag==1)/sum(test_results_log$Attrition_Flag==1)
+  roc_data_log[roc_data_log$threshold==i, "tpr"] <- tpr
+  
+}
+
+ggplot() +
+  geom_line(data = roc_data_log, aes(x = fpr, y = tpr, color = threshold), linewidth = 2) +
+  scale_color_gradientn(colors = rainbow(3)) +
+  geom_abline(intercept = 0, slope = 1, lty = 2) +
+  geom_point(data = roc_data_log[seq(1, 101, 10), ], aes(x = fpr, y = tpr)) +
+  geom_text(data = roc_data_log[seq(1, 101, 10), ],
+            aes(x = fpr, y = tpr, label = threshold, hjust = 1.2, vjust = -0.2))
+```
+
+
+```{r, KNNModel}
+# use cv folds and tune
+knn_cv <- vfold_cv(training_set, v = 5)  
+
+knn_spec <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+
+# create recipe for preprocessing - only numeric var at first
+attrition_recipe_knn <- 
+  recipe(
+    Attrition_Flag ~ Months_on_book + Total_Relationship_Count + Months_Inactive_12_mon + Contacts_Count_12_mon +
+      Total_Amt_Chng_Q4_Q1 + Total_Trans_Amt + Total_Trans_Ct + Total_Ct_Chng_Q4_Q1 + 
+      Avg_Utilization_Ratio, 
+    data = training_set
+  ) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+# create workflow
+knn_wf <- workflow() %>%
+  add_recipe(attrition_recipe_knn) %>%
+  add_model(knn_spec)
+
+# build tuning grid
+knn_tune_grid <- tibble(neighbors = c(5, 10, 15, 20, 25))
+
+# tune
+knn_tune <- knn_wf %>%
+  tune_grid(resamples = knn_cv,
+    grid = knn_tune_grid
+)
+knn_tune
+
+knn_tune %>%
+  collect_metrics()  # use this to id the model with X neighbors w/ lowest 
+
+best_neighbors <- knn_tune %>%
+  select_best(metric = 'roc_auc')
+
+knn_spec_final <- knn_wf %>%
+  finalize_workflow(best_neighbors)
+  
+knn_fit <- knn_spec_final %>%
+  last_fit(split = data_split)
+
+knn_results <- knn_fit %>%
+  collect_predictions()
+
+################################### plot ROC curve ###################################
+
+#roc_data_knn <- data.frame(threshold=seq(1,0,-0.01), fpr=0, tpr=0)
+
+#for (i in roc_data_knn$threshold) {
+  
+#  over_threshold <- knn_results[knn_results$p_1 >= i, ]
+  
+#  fpr <- sum(over_threshold$Attrition_Flag==0)/sum(knn_results$Attrition_Flag==0)
+#  roc_data_knn[roc_data_knn$threshold==i, "fpr"] <- fpr
+  
+#  tpr <- sum(over_threshold$Attrition_Flag==1)/sum(knn_results$Attrition_Flag==1)
+#  roc_data_knn[roc_data_knn$threshold==i, "tpr"] <- tpr
+#}
+
+#ggplot() +
+#  geom_line(data = roc_data_knn, aes(x = fpr, y = tpr, color = threshold), linewidth = 2) +
+#  scale_color_gradientn(colors = rainbow(3)) +
+#  geom_abline(intercept = 0, slope = 1, lty = 2) +
+#  geom_point(data = roc_data_knn[seq(1, 101, 10), ], aes(x = fpr, y = tpr)) +
+#  geom_text(data = roc_data_knn[seq(1, 101, 10), ],
+#            aes(x = fpr, y = tpr, label = threshold, hjust = 1.2, vjust = -0.2))
+
+
+```
+
