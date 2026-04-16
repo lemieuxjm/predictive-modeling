@@ -15,7 +15,7 @@
 
 ## Project Overview
 
-This project investigates the risk determination and feature identification of customer attrition using supervised classification modeling. The client company faces customer attrition (churn) that impacts revenue and growth. This analysis aims to **identify high-risk customers most likely to leave** so the company can proactively intervene with targeted retention efforts, optimize marketing spend, and improve customer lifetime value.
+This project demonstrates the practical application of predictive modeling to solve a real-world business problem. The client company faces customer attrition (churn) that impacts revenue and growth. By comparing multiple machine learning algorithms and carefully evaluating their performance, the analysis produces an optimal model for identifying high-risk customers most likely to leave so the company can proactively intervene. The final aspect of the project is actionable intelligence for business stakeholders to develop targeted retention strategies and improve customer lifetime value.
 
 ## Purpose & Business Impact
 
